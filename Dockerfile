@@ -1,18 +1,22 @@
 # ── Stage 1: builder ──────────────────────────────────────────────────────────
-FROM python:3.11 AS builder
-
-# Install uv (modern Python package manager)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# Copy dependency files first (Docker layer cache)
-COPY pyproject.toml uv.lock ./
+# Install build tools needed by some packages (uvloop, aiohttp, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy only what's needed for install
+COPY requirements-prod.txt ./
 COPY src/ ./src/
 COPY configs/ ./configs/
+COPY pyproject.toml ./
 
-# Install only production deps into /app/.venv
-RUN uv sync --no-dev
+# Install production dependencies into a prefix we can copy over
+RUN pip install --no-cache-dir --prefix=/install -r requirements-prod.txt && \
+    pip install --no-cache-dir --prefix=/install --no-deps -e .
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM python:3.11-slim AS runtime
@@ -22,23 +26,19 @@ RUN groupadd -r churn && useradd -r -g churn churn
 
 WORKDIR /app
 
-# Copy venv from builder (no pip/uv needed in final image)
-COPY --from=builder /app/.venv ./.venv
+# Copy installed packages from builder
+COPY --from=builder /install /usr/local
 COPY --from=builder /app/src ./src
 COPY --from=builder /app/configs ./configs
 
 # Models are mounted at runtime via Docker volume (-v /opt/churn/models:/app/models:ro)
-RUN mkdir -p models
+RUN mkdir -p models logs && chown -R churn:churn /app
 
 # Runtime env
-ENV PATH="/app/.venv/bin:$PATH" \
-    PYTHONDONTWRITEBYTECODE=1 \
+ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     API_ENVIRONMENT=production \
     API_PORT=8000
-
-# Logs dir (writable by churn user)
-RUN mkdir -p logs && chown -R churn:churn /app
 
 USER churn
 
