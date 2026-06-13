@@ -1,62 +1,125 @@
 # Customer Churn Prediction
-### Cell2Cell · XGBoost · FastAPI · MLflow · Docker · AWS (ECR + EC2)
 
-> Predicts telecom customer churn using the **Cell2Cell dataset** (Duke University / Teradata Center for CRM) — 51,047 customers, 58 features.  
-> **Model performance:** ROC-AUC 0.85 · Churn Recall 0.78 (threshold = 0.40)
+A production-grade machine learning system that predicts which telecom customers are likely to cancel their service — and explains exactly why.
+
+Built end-to-end: raw data ingestion → feature engineering → model training with hyperparameter tuning → REST API → Docker → live on AWS.
+
+**Dataset:** Cell2Cell (Duke University / Teradata Center for CRM) — 51,047 customers, 58 features  
+**Best Model:** LightGBM · ROC-AUC 0.683 · deployed on AWS EC2  
+**Live API:** `http://52.71.35.176:8000/docs`
 
 ---
 
-## Architecture
+## What This Project Does
+
+A telecom company loses revenue every time a customer churns. This system:
+
+1. **Predicts** which customers are at risk of leaving (with a probability score)
+2. **Explains** the top reasons driving that risk (powered by SHAP)
+3. **Categorises** each customer into Low / Medium / High risk tiers
+4. **Serves predictions** via a production REST API, live on AWS
+
+---
+
+## How It Works
 
 ```
-Cell2Cell CSV
-     │
-     ▼
-Preprocessing Pipeline (sklearn ColumnTransformer)
-     │  median impute + StandardScaler (numeric)
-     │  most-frequent impute + OrdinalEncoder (categorical)
-     ▼
-SMOTE (28.8% → balanced)
-     │
-     ▼
-Optuna Hyperparameter Search ──► MLflow Experiment Tracking
-     │  XGBoost  (best model)
-     │  LightGBM
-     │  LogisticRegression (baseline)
-     ▼
-Model Registry (MLflow) ──► models/churn_xgb_prod.joblib
-     │
-     ▼
+Cell2Cell Dataset (51k customers, 58 features)
+        │
+        ▼
+Data Cleaning & Feature Engineering
+  • Median imputation for missing numerics
+  • Outlier capping (IQR-based)
+  • 8 engineered features (RevenuePerMinute, DropRate, ServiceStressIndex, ...)
+        │
+        ▼
+Preprocessing Pipeline (scikit-learn)
+  • StandardScaler for numeric columns
+  • OrdinalEncoder for categorical columns
+        │
+        ▼
+SMOTE — balances 71/29 class imbalance on training data only
+        │
+        ▼
+Optuna Hyperparameter Tuning (50 trials per model)
+  + MLflow Experiment Tracking
+        │
+        ├── Logistic Regression (baseline)
+        ├── Random Forest
+        ├── Extra Trees
+        ├── XGBoost
+        ├── LightGBM          ← best on this dataset
+        ├── CatBoost
+        └── Stacking Ensemble (top-3 base models + LR meta-learner)
+        │
+        ▼
+Best Model Auto-Selected by ROC-AUC
+        │
+        ▼
 FastAPI Production API
-     │  POST /predict        (single)
-     │  POST /predict/batch  (up to 1,000 rows)
-     │  GET  /health | /ready | /metrics (Prometheus)
-     ▼
-Docker Image ──► AWS ECR ──► AWS EC2
-                             (GitHub Actions CI/CD)
+  POST /predict          — single prediction (pre-processed)
+  POST /predict/raw      — single prediction (raw CSV columns)
+  POST /predict/batch    — batch up to 1,000 rows
+  GET  /health | /docs   — health check + interactive docs
+        │
+        ▼
+Docker Image → AWS ECR → AWS EC2
+  (deployed automatically via GitHub Actions on every push to main)
 ```
+
+---
+
+## Model Results
+
+Seven models were trained and compared. The best by validation ROC-AUC is automatically selected and deployed.
+
+| Model | ROC-AUC | PR-AUC | Recall | Precision | F1 |
+|---|---|---|---|---|---|
+| Logistic Regression | 0.614 | 0.387 | 0.92 | 0.31 | 0.46 |
+| Random Forest | 0.660 | 0.429 | 0.76 | 0.36 | 0.49 |
+| Extra Trees | 0.645 | 0.404 | 0.81 | 0.35 | 0.49 |
+| CatBoost | 0.679 | 0.454 | 0.89 | 0.34 | 0.49 |
+| XGBoost | 0.682 | 0.462 | 0.87 | 0.34 | 0.48 |
+| Stacking Ensemble | 0.680 | 0.463 | 0.87 | 0.35 | 0.49 |
+| **LightGBM** | **0.683** | **0.466** | **0.88** | **0.34** | **0.48** |
+
+Metrics evaluated at threshold = 0.35, tuned to maximise expected annual retention savings rather than raw accuracy.
+
+---
+
+## Key Feature Engineering
+
+| Feature | What it captures |
+|---|---|
+| `RevenuePerMinute` | Pricing efficiency — low revenue per minute signals churn risk |
+| `DropRate` | Call quality — high drop rate drives dissatisfaction |
+| `ServiceStressIndex` | `CustomerCareCalls × DroppedCalls` — combined friction score |
+| `IsNewCustomer` | Customers in their first 3 months churn at the highest rate |
+| `equipment_age_tier` | Older devices correlate with higher churn |
+| `retention_urgency` | Previously contacted retention team but stayed — high risk flag |
+| `call_quality_rate` | Ratio of successful calls to total attempted |
+| `is_low_usage` | Low engagement signals disengagement before churn |
 
 ---
 
 ## Tech Stack
 
-| Layer | Tool |
+| Layer | Technology |
 |---|---|
-| Package manager | `uv` (replaces pip/poetry) |
-| Config | `pydantic-settings` |
-| Data | pandas 2, pyarrow |
-| ML | XGBoost 2, LightGBM, scikit-learn, imbalanced-learn |
-| Tuning | Optuna |
-| Explainability | SHAP |
+| Language | Python 3.11 |
+| Package manager | `uv` |
+| Data processing | pandas, pyarrow |
+| ML models | XGBoost, LightGBM, CatBoost, scikit-learn, imbalanced-learn |
+| Hyperparameter tuning | Optuna |
 | Experiment tracking | MLflow |
+| Explainability | SHAP |
 | API | FastAPI + Uvicorn |
-| Observability | Prometheus + loguru |
-| Lint / Format | Ruff |
-| Type checking | Mypy |
-| Tests | pytest + pytest-asyncio + pytest-cov |
-| Containers | Docker multi-stage + Docker Compose |
+| Observability | Prometheus metrics + Loguru logging |
+| Containerisation | Docker (multi-stage build, non-root user) |
 | CI/CD | GitHub Actions |
-| Cloud | AWS ECR (registry) + EC2 (inference) |
+| Cloud | AWS ECR (image registry) + EC2 (inference server) |
+| Infrastructure as Code | Terraform |
+| Config management | Pydantic Settings |
 
 ---
 
@@ -64,319 +127,283 @@ Docker Image ──► AWS ECR ──► AWS EC2
 
 ```
 customer-churn-prediction/
+│
 ├── src/churn/
 │   ├── data/
-│   │   ├── ingest.py        # Kaggle download or local copy
-│   │   └── preprocess.py    # sklearn pipeline (impute, scale, encode)
+│   │   ├── ingest.py          # Downloads dataset from Kaggle or local copy
+│   │   └── preprocess.py      # Full sklearn pipeline — impute, scale, encode
 │   ├── features/
-│   │   └── engineer.py      # SMOTE, interaction features, feature selection
+│   │   └── engineer.py        # Feature creation, SMOTE, interaction terms
 │   ├── models/
-│   │   ├── train.py         # Optuna + MLflow training orchestrator
-│   │   └── evaluate.py      # SHAP, ROC/PR curves, confusion matrix
-│   ├── api/
-│   │   ├── main.py          # FastAPI app (lifespan, routes, middleware)
-│   │   └── schemas.py       # Pydantic v2 request/response models
-│   └── utils/
-│       └── logging.py       # Loguru setup
+│   │   ├── train.py           # Trains all 7 models with Optuna + MLflow
+│   │   └── evaluate.py        # SHAP plots, ROC/PR curves, confusion matrix
+│   └── api/
+│       ├── main.py            # FastAPI app — routes, middleware, model loading
+│       └── schemas.py         # Pydantic request/response schemas
+│
 ├── configs/
-│   └── settings.py          # pydantic-settings — single source of truth
-├── tests/
-│   ├── unit/                # Preprocessing unit tests
-│   └── integration/         # FastAPI async integration tests
+│   └── settings.py            # Single source of truth for all configuration
+│
+├── infrastructure/
+│   ├── main.tf                # AWS resources — ECR, EC2, IAM, security groups
+│   ├── variables.tf           # Configurable inputs
+│   └── outputs.tf             # Prints GitHub secrets after terraform apply
+│
 ├── notebooks/
-│   └── 01_eda.ipynb         # Cell2Cell EDA
+│   ├── 01_eda.ipynb           # Exploratory data analysis
+│   └── 02_modeling.ipynb      # Model comparison, threshold analysis, SHAP plots
+│
 ├── scripts/
-│   └── predict.py           # Batch scoring CLI (typer + rich)
+│   └── predict.py             # CLI batch scoring tool
+│
 ├── .github/workflows/
-│   └── ci_cd.yml            # Lint → Test → Build → ECR → EC2 deploy
-├── Dockerfile               # Multi-stage (builder + runtime), non-root user
-├── docker-compose.yml       # API + MLflow UI
-├── pyproject.toml           # uv + hatchling + ruff + mypy + pytest config
-├── Makefile                 # All dev commands
-└── .env.example             # Environment variable reference
+│   └── ci_cd.yml              # Build → Push to ECR → Deploy to EC2
+│
+├── Dockerfile                 # Multi-stage build — builder + slim runtime
+├── docker-compose.yml         # Local dev — API + MLflow UI
+├── pyproject.toml             # Dependencies and tooling config
+└── Makefile                   # Shortcuts for every common task
 ```
 
 ---
 
-## Quick Start
+## Running Locally
 
 ### Prerequisites
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) — `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- Docker Desktop (for local containerised run)
-- AWS CLI (for ECR/EC2 deploy)
 
-### 1. Clone & install
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) — fast Python package manager
+- Docker Desktop — for containerised local run
+
+### 1. Clone and install
 
 ```bash
-git clone https://github.com/<you>/customer-churn-prediction.git
-cd customer-churn-prediction
+git clone https://github.com/AkshatParikh16/Customer-Churn-Prediction.git
+cd Customer-Churn-Prediction
 
-# Install all dependencies (creates .venv automatically)
+# Creates .venv and installs all dependencies
 uv sync --dev
 ```
 
 ### 2. Get the dataset
 
-**Option A — Kaggle API** (requires `~/.kaggle/kaggle.json`)
-```bash
-make ingest
+Download from Kaggle: [jpacse/datasets-for-churn-telecom](https://www.kaggle.com/datasets/jpacse/datasets-for-churn-telecom)
+
+Place the files in `data/raw/`:
+```
+data/raw/cell2celltrain.csv
+data/raw/cell2celltest.csv
 ```
 
-**Option B — Manual download**
-1. Download from [Kaggle: jpacse/datasets-for-churn-telecom](https://www.kaggle.com/datasets/jpacse/datasets-for-churn-telecom)
-2. Place files:
+### 3. Explore the data
+
 ```bash
-make ingest-local  # after placing CSVs in data/raw/
-# or:
-cp ~/Downloads/cell2celltrain.csv data/raw/
-cp ~/Downloads/cell2celltest.csv  data/raw/
+jupyter notebook notebooks/01_eda.ipynb
 ```
 
-### 3. Explore (EDA)
+### 4. Train models
 
 ```bash
-uv run jupyter lab notebooks/01_eda.ipynb
+# Full training run with Optuna tuning (~45 min)
+python -m churn.models.train
+
+# Quick run with default parameters (~5 min)
+python -m churn.models.train --skip-tuning
 ```
 
-### 4. Train
+### 5. View results in MLflow
 
 ```bash
-# Full run: Optuna 50 trials per model + MLflow logging
-make train
-
-# Fast run: default params, no tuning (good for testing the pipeline)
-make train-fast
-
-# View MLflow UI
-make docker-up    # starts MLflow at http://localhost:5000
+mlflow ui --backend-store-uri sqlite:///mlruns/mlflow.db
+# Open http://localhost:5000
 ```
 
-### 5. Evaluate
+### 6. Start the API
 
 ```bash
-uv run python -m churn.models.evaluate
-# Reports saved to reports/: confusion matrix, ROC/PR curves, SHAP plots
+uvicorn churn.api.main:app --reload --port 8000
+# Open http://localhost:8000/docs
 ```
 
-### 6. Serve the API
+### 7. Run a prediction
 
 ```bash
-# Dev (hot reload)
-make serve
-# → http://localhost:8000/docs
-
-# Production (Docker)
-make docker-up
-# → API: http://localhost:8000/docs
-# → MLflow: http://localhost:5000
-```
-
-### 7. Test
-
-```bash
-make test                 # all tests + coverage report
-make test-unit            # preprocessing unit tests only
-make test-integration     # FastAPI async integration tests only
-```
-
-### 8. Batch predict
-
-```bash
-uv run python scripts/predict.py batch data/raw/cell2celltest.csv
-# Output: reports/predictions.csv
+curl -X POST http://localhost:8000/predict/raw \
+  -H "Content-Type: application/json" \
+  -d '{
+    "MonthlyRevenue": 55.0,
+    "MonthlyMinutes": 400,
+    "DroppedCalls": 8,
+    "MonthsInService": 6,
+    "CreditRating": "Poor",
+    "MadeCallToRetentionTeam": "Yes"
+  }'
 ```
 
 ---
 
 ## API Reference
 
-Two prediction modes are available — use whichever fits your pipeline.
+The API runs at `http://52.71.35.176:8000` (live on AWS).
 
-### Mode A — Pre-processed vector (fastest)
+Interactive docs: `http://52.71.35.176:8000/docs`
 
-Requires you to run the same preprocessing pipeline client-side. Use `GET /model/info`
-to get the exact feature ordering.
+### Predict from raw customer data
 
-```bash
-# Single prediction
-curl -X POST http://localhost:8000/predict \
-  -H "Content-Type: application/json" \
-  -d '{"customer_id": "C12345", "features": [0.5, 1.0, 0.3, ...]}'
-
-# Batch (up to 1,000 rows)
-curl -X POST http://localhost:8000/predict/batch \
-  -H "Content-Type: application/json" \
-  -d '{"rows": [{"customer_id": "C1", "features": [...]}, ...]}'
-```
-
-### Mode B — Raw Cell2Cell columns (no client-side preprocessing needed)
-
-Send the raw column values exactly as they appear in the CSV.
-The API runs the full preprocessing pipeline internally.
+Send the raw column values — the API handles all preprocessing internally.
 
 ```bash
-# Single prediction — raw columns
-curl -X POST http://localhost:8000/predict/raw \
-  -H "Content-Type: application/json" \
-  -d '{
-    "customer_id": "C12345",
-    "MonthlyRevenue": 55.0,
-    "MonthlyMinutes": 400,
-    "DroppedCalls": 3,
-    "MonthsInService": 18,
-    "CreditRating": "Good",
-    "MadeCallToRetentionTeam": "No"
-  }'
+POST /predict/raw
 
-# Batch raw (up to 1,000 rows)
-curl -X POST http://localhost:8000/predict/batch/raw \
-  -H "Content-Type: application/json" \
-  -d '{"rows": [{"customer_id": "C1", "MonthlyRevenue": 55.0, ...}]}'
+{
+  "customer_id": "C12345",        # optional
+  "MonthlyRevenue": 55.0,
+  "MonthlyMinutes": 400,
+  "DroppedCalls": 8,
+  "MonthsInService": 6,
+  "CreditRating": "Poor",
+  "MadeCallToRetentionTeam": "Yes"
+}
 ```
 
-**Response (both modes):**
-```json
+### Predict from pre-processed features
+
+If you have already run the preprocessing pipeline yourself.
+
+```bash
+POST /predict
+
 {
   "customer_id": "C12345",
-  "churn_probability": 0.7231,
-  "churn_predicted": true,
-  "risk_tier": "High",
-  "threshold_used": 0.4,
-  "top_reasons": [
-    {"feature": "MonthsInService", "shap_value": 0.18, "direction": "increases churn risk"},
-    {"feature": "DroppedCalls",    "shap_value": 0.12, "direction": "increases churn risk"}
+  "features": [0.5, 1.2, -0.3, ...]   # must match feature_names.joblib ordering
+}
+```
+
+### Batch prediction (up to 1,000 rows)
+
+```bash
+POST /predict/batch/raw
+
+{
+  "rows": [
+    { "MonthlyRevenue": 55.0, "DroppedCalls": 8, ... },
+    { "MonthlyRevenue": 90.0, "DroppedCalls": 1, ... }
   ]
 }
 ```
 
-### `GET /health` · `GET /ready` · `GET /model/info` · `GET /metrics`
-Liveness, readiness, model metadata, and Prometheus metrics endpoints.
+### Response format
+
+Every prediction returns:
+
+```json
+{
+  "customer_id": "C12345",
+  "churn_probability": 0.73,
+  "churn_predicted": true,
+  "risk_tier": "High",
+  "threshold_used": 0.35,
+  "top_reasons": [
+    {
+      "feature": "DroppedCalls",
+      "shap_value": 0.18,
+      "direction": "increases churn risk"
+    },
+    {
+      "feature": "MonthsInService",
+      "shap_value": 0.12,
+      "direction": "increases churn risk"
+    }
+  ]
+}
+```
+
+### Other endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /health` | Liveness check |
+| `GET /ready` | Readiness check (model loaded) |
+| `GET /model/info` | Model name, version, threshold, feature list |
+| `GET /metrics` | Prometheus metrics |
 
 ---
 
 ## AWS Deployment
 
-### Step 0 — Provision infrastructure (Terraform)
+The deployment is fully automated. Every push to `main` triggers the GitHub Actions pipeline.
 
-All AWS resources (ECR, EC2, IAM OIDC role, Elastic IP) live in `infrastructure/`.
-Run this once before the first push:
+### How the pipeline works
+
+```
+git push main
+      │
+      ▼
+GitHub Actions
+  1. Build Docker image
+  2. Push to AWS ECR
+  3. SSH into EC2
+  4. Pull latest image and restart container
+  5. Health check — confirm API is responding
+```
+
+### Infrastructure (Terraform)
+
+All AWS resources are defined as code in `infrastructure/`:
+
+- **ECR** — private Docker image registry
+- **EC2** (t3.micro, Free Tier) — inference server running Amazon Linux 2023
+- **Elastic IP** — stable public IP address
+- **IAM OIDC role** — lets GitHub Actions authenticate to AWS without storing any keys
+- **Security group** — opens ports 80 and 8000
+
+To re-provision from scratch:
 
 ```bash
 cd infrastructure
-
-# Create terraform.tfvars with your values
-cat > terraform.tfvars <<EOF
-github_org  = "your-github-username"
-github_repo = "customer-churn-prediction"
-aws_region  = "us-east-1"
-ec2_key_name = "my-keypair"
-EOF
-
 terraform init
-terraform apply          # ~2 min, prints all 4 secrets at the end
+terraform apply \
+  -var="github_org=AkshatParikh16" \
+  -var="github_repo=Customer-Churn-Prediction" \
+  -var="ec2_key_name=churn-api-key" \
+  -var="ec2_instance_type=t3.micro"
 ```
-
-Copy the `github_secrets_summary` output values into **GitHub → Settings → Secrets → Actions**.
 
 ### GitHub Actions Secrets required
 
-| Secret | Description |
+| Secret | Value |
 |---|---|
-| `AWS_IAM_ROLE_ARN` | OIDC role ARN (no stored keys!) |
-| `AWS_REGION` | e.g. `us-east-1` |
-| `ECR_REGISTRY` | `<account>.dkr.ecr.<region>.amazonaws.com` |
-| `EC2_HOST` | EC2 public IP or hostname |
-| `EC2_SSH_KEY` | Private key for `ec2-user` |
-
-### Manual ECR push
-
-```bash
-export AWS_ACCOUNT_ID=<your-account-id>
-export AWS_REGION=us-east-1
-make ecr-push
-```
-
-### EC2 setup (one-time)
-
-```bash
-# On your EC2 instance (Amazon Linux 2023 / t3.medium)
-sudo yum install -y docker
-sudo systemctl start docker
-sudo usermod -aG docker ec2-user
-
-# Create model directory
-sudo mkdir -p /opt/churn/models /opt/churn/logs
-
-# Copy trained model
-scp models/churn_xgb_prod.joblib ec2-user@<EC2_HOST>:/opt/churn/models/
-```
-
-After first setup, every `git push main` triggers the full pipeline automatically.
+| `AWS_IAM_ROLE_ARN` | IAM OIDC role ARN from Terraform output |
+| `AWS_REGION` | `us-east-1` |
+| `ECR_REGISTRY` | ECR registry URL from Terraform output |
+| `EC2_HOST` | EC2 public IP from Terraform output |
+| `EC2_SSH_KEY` | Contents of `churn-api-key.pem` |
 
 ---
 
-## Model Lineup
-
-Seven models are trained and compared on every run. The best by ROC-AUC is auto-selected.
-
-| # | Model | Tuning |
-|---|---|---|
-| 1 | Logistic Regression (baseline) | None |
-| 2 | Random Forest | Optuna 50 trials |
-| 3 | Extra Trees | Optuna 50 trials |
-| 4 | XGBoost | Optuna 50 trials |
-| 5 | LightGBM | Optuna 50 trials |
-| 6 | CatBoost | Optuna 50 trials |
-| 7 | Stacking Ensemble | Top-3 base → LR meta |
-
-**Benchmark performance** (XGBoost, typical run):
-
-| Model | ROC-AUC | Recall (Churn) | Precision | F1 |
-|---|---|---|---|---|
-| Logistic Regression | 0.78 | 0.65 | 0.62 | 0.63 |
-| Random Forest | 0.82 | 0.73 | 0.66 | 0.69 |
-| Extra Trees | 0.81 | 0.72 | 0.65 | 0.68 |
-| LightGBM | 0.84 | 0.76 | 0.68 | 0.72 |
-| **XGBoost** | **0.85** | **0.78** | **0.71** | **0.74** |
-| CatBoost | 0.84 | 0.77 | 0.70 | 0.73 |
-| Stacking | 0.85 | 0.78 | 0.72 | 0.75 |
-
-**Decision threshold = 0.40** (not default 0.50) — tuned to maximise expected annual retention savings.
-
----
-
-## Key Feature Engineering Decisions
-
-| Feature | Rationale |
-|---|---|
-| SMOTE on train only | Handles 71/29 imbalance without leaking into val/test |
-| `scale_pos_weight = 2.47` | Complementary class-weight signal for XGBoost |
-| `RevenuePerMinute` | Pricing signal — low revenue per minute = high churn risk |
-| `DropRate` | Quality signal — dropped calls drive dissatisfaction |
-| `ServiceStressIndex` | `CustomerCareCalls × DroppedCalls` — combined friction |
-| `IsNewCustomer` (≤3 months) | New customers churn most in first quarter |
-| Median imputation (numeric) | Robust to outliers in MonthlyRevenue, HandsetPrice |
-| OrdinalEncoder for categories | Preserves natural ordering in CreditRating |
-
----
-
-## Development Commands
+## Useful Commands
 
 ```bash
-make setup          # install all deps
-make ingest         # download Cell2Cell
-make train          # train + track with MLflow
-make train-fast     # train with default params
-make serve          # dev API server (hot reload)
-make test           # pytest + coverage
-make lint           # ruff check
-make format         # ruff format + fix
-make typecheck      # mypy
-make docker-up      # API + MLflow UI
-make docker-down    # stop containers
-make ecr-push       # push to AWS ECR
-make clean          # remove build artifacts
+# Training
+python -m churn.models.train               # full Optuna run
+python -m churn.models.train --skip-tuning # fast run, default params
+
+# Evaluation
+python -m churn.models.evaluate            # SHAP plots + metrics
+
+# API
+uvicorn churn.api.main:app --reload        # dev server
+
+# Batch predictions from CSV
+python scripts/predict.py batch data/raw/cell2celltest.csv
+
+# Docker
+docker compose up                          # API + MLflow locally
+docker compose down
+
+# Infrastructure
+cd infrastructure && terraform apply       # provision AWS
+cd infrastructure && terraform destroy     # tear everything down
 ```
 
 ---
