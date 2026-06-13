@@ -1,0 +1,120 @@
+name: CI/CD — Build · Deploy
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION:      ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY:  customer-churn-prediction
+  IMAGE_TAG:       ${{ github.sha }}
+
+jobs:
+  # ── 1. Build & Push Docker → ECR ────────────────────────────────────────────
+  build-and-push:
+    name: Build & Push to ECR
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      image: ${{ steps.build-image.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag & push image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          IMAGE=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          LATEST=$ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          docker build \
+            --target runtime \
+            --cache-from $LATEST \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            -t $IMAGE \
+            -t $LATEST \
+            .
+
+          docker push $IMAGE
+          docker push $LATEST
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
+
+  # ── 2. Deploy to EC2 ────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: production
+
+    steps:
+      - name: SSH deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          AWS_REGION:     ${{ env.AWS_REGION }}
+          ECR_REGISTRY:   ${{ secrets.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
+        with:
+          host:     ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          envs:     AWS_REGION,ECR_REGISTRY,ECR_REPOSITORY
+          script: |
+            # Authenticate to ECR
+            aws ecr get-login-password --region $AWS_REGION \
+              | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+            IMAGE=$ECR_REGISTRY/$ECR_REPOSITORY:latest
+            docker pull $IMAGE
+
+            docker stop churn-api 2>/dev/null || true
+            docker rm   churn-api 2>/dev/null || true
+
+            docker run -d \
+              --name churn-api \
+              --restart unless-stopped \
+              -p 8000:8000 \
+              -e API_ENVIRONMENT=production \
+              -v /opt/churn/models:/app/models:ro \
+              -v /opt/churn/logs:/app/logs \
+              $IMAGE
+
+            sleep 12
+            docker ps | grep churn-api
+            echo "=== Deployment complete ==="
+            echo "Chat UI  → http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)/chat-ui"
+            echo "API docs → http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):8000/docs"
+
+  # ── 3. Smoke test ────────────────────────────────────────────────────────────
+  smoke-test:
+    name: Smoke Test
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Health check
+        run: |
+          for i in 1 2 3 4 5; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ secrets.EC2_HOST }}:8000/health)
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check passed"
+              echo "Chat UI  → http://${{ secrets.EC2_HOST }}/chat-ui"
+              echo "API docs → http://${{ secrets.EC2_HOST }}:8000/docs"
+              exit 0
+            fi
+            echo "Attempt $i failed ($STATUS), retrying in 10s…"
+            sleep 10
+          done
+          echo "Health check failed"; exit 1
