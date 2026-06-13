@@ -1,42 +1,30 @@
-# ── Stage 1: builder ──────────────────────────────────────────────────────────
-FROM python:3.11-slim AS builder
+FROM python:3.11-slim
 
-WORKDIR /app
-
-# Install build tools needed by some packages (uvloop, aiohttp, etc.)
+# Build tools for C-extension packages (uvloop, aiohttp, etc.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy only what's needed for install
-COPY requirements-prod.txt ./
-COPY src/ ./src/
-COPY configs/ ./configs/
-COPY pyproject.toml ./
-
-# Install production dependencies into a prefix we can copy over
-RUN pip install --no-cache-dir --prefix=/install -r requirements-prod.txt && \
-    pip install --no-cache-dir --prefix=/install --no-deps -e .
-
-# ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM python:3.11-slim AS runtime
-
-# Security: non-root user
-RUN groupadd -r churn && useradd -r -g churn churn
-
 WORKDIR /app
 
-# Copy installed packages from builder
-COPY --from=builder /install /usr/local
-COPY --from=builder /app/src ./src
-COPY --from=builder /app/configs ./configs
+# Install production dependencies
+COPY requirements-prod.txt ./
+RUN pip install --no-cache-dir -r requirements-prod.txt
 
-# Models are mounted at runtime via Docker volume (-v /opt/churn/models:/app/models:ro)
-RUN mkdir -p models logs && chown -R churn:churn /app
+# Copy source and config
+COPY src/ ./src/
+COPY configs/ ./configs/
 
-# Runtime env
+# Empty models dir — filled at runtime via volume mount
+RUN mkdir -p models logs
+
+# Non-root user
+RUN groupadd -r churn && useradd -r -g churn churn && \
+    chown -R churn:churn /app
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
     API_ENVIRONMENT=production \
     API_PORT=8000
 
