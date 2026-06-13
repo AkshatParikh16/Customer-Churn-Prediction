@@ -28,8 +28,8 @@ COPY --from=builder /app/.venv ./.venv
 COPY --from=builder /app/src ./src
 COPY --from=builder /app/configs ./configs
 
-# Copy trained model (mounted or baked in at build time)
-COPY models/ ./models/
+# Models are mounted at runtime via Docker volume (-v /opt/churn/models:/app/models:ro)
+RUN mkdir -p models
 
 # Runtime env
 ENV PATH="/app/.venv/bin:$PATH" \
