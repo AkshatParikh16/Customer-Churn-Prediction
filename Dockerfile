@@ -12,8 +12,7 @@ COPY src/ ./src/
 COPY configs/ ./configs/
 
 # Install only production deps into /app/.venv
-RUN uv venv .venv && \
-    uv pip install --no-dev --python .venv/bin/python -e .
+RUN uv sync --no-dev
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM python:3.11-slim AS runtime
